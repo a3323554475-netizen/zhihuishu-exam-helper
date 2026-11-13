@@ -41,6 +41,10 @@
 
 ## 运行
 
+**双击 `启动.cmd` 即可。** 它调用 `launch.vbs`，以无控制台方式启动 `Start-ExamHelper.ps1`，所以除了程序窗口之外不会多出一个黑框。
+
+命令行方式（想看到报错时用这个）：
+
 ```powershell
 powershell -NoProfile -ExecutionPolicy Bypass -File .\Start-ExamHelper.ps1
 ```

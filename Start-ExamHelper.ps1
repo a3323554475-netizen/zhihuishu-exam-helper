@@ -608,6 +608,7 @@ function Show-Disclaimer {
     $box.Font = New-Object System.Drawing.Font('Microsoft YaHei UI', 9.5)
     $dlg.Controls.Add($box)
     $dlg.Add_Shown({ $box.SelectionStart = 0; $box.SelectionLength = 0; $box.ScrollToCaret() })
+    $dlg.Add_Shown({ [void][ExamWin]::ShowWindow($dlg.Handle, 5); $dlg.Activate() })
 
     $chkNever = New-Object System.Windows.Forms.CheckBox
     $chkNever.Text = '本版本不再提示'
@@ -894,6 +895,8 @@ $btnSubmit.Add_Click({
 })
 
 $form.Add_Shown({
+    [void][ExamWin]::ShowWindow($form.Handle, 5)
+    $form.Activate()
     $script:updateTimer.Start()
     if ($script:settings.Contains('baseUrl') -and $script:settings['baseUrl']) { $txtBase.Text = [string]$script:settings['baseUrl'] }
     if ($script:settings.Contains('model') -and $script:settings['model']) { $txtModel.Text = [string]$script:settings['model'] }
