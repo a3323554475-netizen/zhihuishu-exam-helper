@@ -1,17 +1,17 @@
 ﻿#requires -Version 5.1
 <#
-  Start-ExamHelper.ps1  v0.3.0 - 智慧树/在线学堂单元测试助手（公开版）
+  Start-ExamHelper.ps1  v0.4.0 - 智慧树/在线学堂单元测试助手（公开版）
+
+  v0.4.0
+    - 图片题支持“自动看图作答”，同时保留“跳过 / 停留等我做”两种人工选项
+    - 界面重排：统一字体、按钮自适应宽度、不再出现文字被截断
+    - 免责声明按用户提供的定稿替换（第二条改为三种图片题模式）
 
   v0.3.0
-    - 启动免责声明：正确率/图片题/为爱发电/反馈方式/安全说明，可按版本永久关闭
-    - 版本更新提示：启动时后台比对 GitHub 最新版本，有新版本在窗口底部提示
-    - 配置持久化：Base URL / Model / 窗口标题片段 / 图片题策略 / 窗口位置
+    - 启动免责声明（可按版本永久关闭）、GitHub 更新提示、配置持久化
 
   v0.2.0
-    - 运行收托盘，不遮挡浏览器
-    - 读选项状态后只点差异，重复运行不会把已选点掉
-    - 图片题可选“跳过/停留等我做”
-    - 收尾与提交前核对答题卡，列出未答题号
+    - 运行收托盘、只点差异项、图片题可选、答题卡核对
 
   用法： powershell -NoProfile -ExecutionPolicy Bypass -File .\Start-ExamHelper.ps1
 #>
@@ -23,7 +23,7 @@ Add-Type -AssemblyName UIAutomationTypes
 
 $ErrorActionPreference = 'Stop'
 
-$script:AppVersion = '0.3.0'
+$script:AppVersion = '0.4.0'
 $script:RepoOwner = 'a3323554475-netizen'
 $script:RepoName = 'zhihuishu-exam-helper'
 $script:RepoUrl = "https://github.com/$($script:RepoOwner)/$($script:RepoName)"
@@ -242,7 +242,7 @@ function Get-WindowShot([string]$match) {
     $g = [System.Drawing.Graphics]::FromImage($bmp)
     $g.CopyFromScreen($r.Left, $r.Top, 0, 0, (New-Object System.Drawing.Size($w, $h)))
     $g.Dispose()
-    return [pscustomobject]@{ Bitmap = $bmp; Left = $r.Left; Top = $r.Top }
+    return [pscustomobject]@{ Bitmap = $bmp; Left = $r.Left; Top = $r.Top; Width = $w; Height = $h }
 }
 
 function Test-BlueAt($bmp, [int]$x, [int]$y) {
@@ -277,31 +277,98 @@ function Get-SelectedLetters($doc, [string]$match) {
     return $sel
 }
 
+# 截取题干与四个选项（含图片）作为一张图，供视觉模型作答
+function Get-QuestionImage([string]$match, $q) {
+    $shot = Get-WindowShot $match
+    if (-not $shot) { return $null }
+    try {
+        $items = Get-Items (Get-ExamDoc $match)
+        $startRect = $null
+        $lastRect = $null
+        foreach ($it in $items) {
+            if ($it.T -ne 'Text') { continue }
+            if (-not $startRect -and $it.N -match '^\d+\.?$') { $startRect = $it.E.Current.BoundingRectangle }
+            if ($it.N -match '^[A-D]\.$') { $lastRect = $it.E.Current.BoundingRectangle }
+        }
+        if (-not $startRect -or -not $lastRect) { return $null }
+
+        $left = [int]($startRect.Left - $shot.Left - 12)
+        $top = [int]($startRect.Top - $shot.Top - 8)
+        $right = [int]($lastRect.Left - $shot.Left + 620)
+        $bottom = [int]($lastRect.Top - $shot.Top + 90)
+
+        if ($left -lt 0) { $left = 0 }
+        if ($top -lt 0) { $top = 0 }
+        if ($right -gt $shot.Width - 1) { $right = $shot.Width - 1 }
+        if ($bottom -gt $shot.Height - 1) { $bottom = $shot.Height - 1 }
+        $w = $right - $left
+        $h = $bottom - $top
+        if ($w -lt 40 -or $h -lt 40) { return $null }
+
+        $rect = New-Object System.Drawing.Rectangle($left, $top, $w, $h)
+        $crop = $shot.Bitmap.Clone($rect, $shot.Bitmap.PixelFormat)
+        $ms = New-Object System.IO.MemoryStream
+        $crop.Save($ms, [System.Drawing.Imaging.ImageFormat]::Png)
+        $crop.Dispose()
+        $bytes = $ms.ToArray()
+        $ms.Dispose()
+        return [Convert]::ToBase64String($bytes)
+    }
+    catch { return $null }
+    finally { $shot.Bitmap.Dispose() }
+}
+
 # ---------------------------------------------------------------- 模型调用
+
+function New-ModelBody([string]$model, $messages) {
+    return @{
+        model       = $model
+        temperature = 0
+        messages    = $messages
+    } | ConvertTo-Json -Depth 10
+}
+
+function ConvertTo-Letters([string]$text) {
+    $letters = ''
+    foreach ($m in [regex]::Matches($text.ToUpper(), '[A-D]')) {
+        if ($letters -notlike ('*' + $m.Value + '*')) { $letters += $m.Value }
+    }
+    return $letters
+}
 
 function Ask-Model([string]$baseUrl, [string]$model, [string]$key, $q) {
     $pairs = @()
     foreach ($k in $q.Options.Keys) { $pairs += ($k + '. ' + $q.Options[$k]) }
     $sys = '你是考试答题助手。只输出选项字母，不要解释。单选题与判断题输出 1 个字母；多选题输出多个大写字母连写，例如 ABCD。'
     $user = '题型：' + $q.Type + "`n题干：" + $q.Stem + "`n选项：`n" + ($pairs -join "`n")
-    $body = @{
-        model       = $model
-        temperature = 0
-        messages    = @(
-            @{ role = 'system'; content = $sys },
-            @{ role = 'user'; content = $user }
-        )
-    } | ConvertTo-Json -Depth 6
-
+    $body = New-ModelBody $model @(
+        @{ role = 'system'; content = $sys },
+        @{ role = 'user'; content = $user }
+    )
     $uri = $baseUrl.TrimEnd('/') + '/chat/completions'
     $headers = @{ Authorization = ('Bearer ' + $key); 'Content-Type' = 'application/json' }
     $resp = Invoke-RestMethod -Uri $uri -Method Post -Headers $headers -Body ([Text.Encoding]::UTF8.GetBytes($body)) -TimeoutSec 90
     $text = [string]$resp.choices[0].message.content
-    $letters = ''
-    foreach ($m in [regex]::Matches($text.ToUpper(), '[A-D]')) {
-        if ($letters -notlike ('*' + $m.Value + '*')) { $letters += $m.Value }
-    }
-    return [pscustomobject]@{ Letters = $letters; Raw = $text }
+    return [pscustomobject]@{ Letters = (ConvertTo-Letters $text); Raw = $text }
+}
+
+# 图片题：把题目截图交给支持图像输入的模型
+function Ask-Model-Vision([string]$baseUrl, [string]$model, [string]$key, $q, [string]$pngBase64) {
+    $sys = '你是考试答题助手。图片中是一道题和它的选项截图。只输出正确选项的字母，不要解释；多选题输出多个大写字母连写，例如 ABCD。'
+    $userText = '题型：' + $q.Type + '。请根据图片判断正确选项字母。'
+    $content = @(
+        @{ type = 'text'; text = $userText },
+        @{ type = 'image_url'; image_url = @{ url = ('data:image/png;base64,' + $pngBase64) } }
+    )
+    $body = New-ModelBody $model @(
+        @{ role = 'system'; content = $sys },
+        @{ role = 'user'; content = $content }
+    )
+    $uri = $baseUrl.TrimEnd('/') + '/chat/completions'
+    $headers = @{ Authorization = ('Bearer ' + $key); 'Content-Type' = 'application/json' }
+    $resp = Invoke-RestMethod -Uri $uri -Method Post -Headers $headers -Body ([Text.Encoding]::UTF8.GetBytes($body)) -TimeoutSec 120
+    $text = [string]$resp.choices[0].message.content
+    return [pscustomobject]@{ Letters = (ConvertTo-Letters $text); Raw = $text }
 }
 
 # ---------------------------------------------------------------- 作答：只点差异项
@@ -386,15 +453,17 @@ function Scan-Missing([string]$match, [switch]$Quiet) {
 
 $form = New-Object System.Windows.Forms.Form
 $form.Text = '智慧树单元测试助手 v' + $script:AppVersion
-$form.Size = New-Object System.Drawing.Size(700, 500)
+$form.ClientSize = New-Object System.Drawing.Size(780, 600)
+$form.MinimumSize = New-Object System.Drawing.Size(720, 520)
 $form.StartPosition = 'Manual'
 $form.TopMost = $false
 $form.AutoScaleMode = [System.Windows.Forms.AutoScaleMode]::None
-$form.MinimumSize = New-Object System.Drawing.Size(560, 260)
+$form.Font = New-Object System.Drawing.Font('Microsoft YaHei UI', 9)
+$form.BackColor = [System.Drawing.Color]::FromArgb(248, 249, 251)
 
 $wa = [System.Windows.Forms.Screen]::PrimaryScreen.WorkingArea
-$startX = $wa.Right - 720
-$startY = $wa.Bottom - 520
+$startX = $wa.Right - 820
+$startY = $wa.Bottom - 660
 if ($script:settings.Contains('windowX') -and $script:settings.Contains('windowY')) {
     try {
         $startX = [int]$script:settings['windowX']
@@ -403,134 +472,177 @@ if ($script:settings.Contains('windowX') -and $script:settings.Contains('windowY
 }
 $form.Location = New-Object System.Drawing.Point($startX, $startY)
 
-function Add-Label($parent, $text, $x, $y, $w) {
+function New-FlatButton([string]$text, [int]$x, [int]$y, [int]$w, [int]$h) {
+    $b = New-Object System.Windows.Forms.Button
+    $b.Text = $text
+    $b.Location = New-Object System.Drawing.Point($x, $y)
+    $b.Size = New-Object System.Drawing.Size($w, $h)
+    $b.FlatStyle = 'System'
+    $b.UseVisualStyleBackColor = $true
+    $b.TextAlign = 'MiddleCenter'
+    return $b
+}
+
+$panelTop = New-Object System.Windows.Forms.Panel
+$panelTop.Location = New-Object System.Drawing.Point(8, 6)
+$panelTop.Size = New-Object System.Drawing.Size(764, 176)
+$panelTop.Anchor = 'Top,Left,Right'
+$panelTop.BackColor = [System.Drawing.Color]::White
+$form.Controls.Add($panelTop)
+
+function Add-Caption($parent, [string]$text, [int]$x, [int]$y, [int]$w) {
     $l = New-Object System.Windows.Forms.Label
     $l.Text = $text
+    $l.TextAlign = 'MiddleRight'
     $l.Location = New-Object System.Drawing.Point($x, $y)
-    $l.Size = New-Object System.Drawing.Size($w, 20)
+    $l.Size = New-Object System.Drawing.Size($w, 24)
+    $l.ForeColor = [System.Drawing.Color]::FromArgb(70, 74, 82)
     $parent.Controls.Add($l)
     return $l
 }
 
-Add-Label $form 'API Base URL' 12 15 90 | Out-Null
+Add-Caption $panelTop 'API Base URL' 6 12 122 | Out-Null
 $txtBase = New-Object System.Windows.Forms.TextBox
-$txtBase.Location = New-Object System.Drawing.Point(104, 12)
-$txtBase.Size = New-Object System.Drawing.Size(570, 24)
+$txtBase.Location = New-Object System.Drawing.Point(134, 12)
+$txtBase.Size = New-Object System.Drawing.Size(620, 26)
 $txtBase.Text = 'https://api.deepseek.com/v1'
-$form.Controls.Add($txtBase)
+$panelTop.Controls.Add($txtBase)
 
-Add-Label $form 'Model' 12 45 90 | Out-Null
+Add-Caption $panelTop 'Model' 6 46 122 | Out-Null
 $txtModel = New-Object System.Windows.Forms.TextBox
-$txtModel.Location = New-Object System.Drawing.Point(104, 42)
-$txtModel.Size = New-Object System.Drawing.Size(260, 24)
+$txtModel.Location = New-Object System.Drawing.Point(134, 46)
+$txtModel.Size = New-Object System.Drawing.Size(240, 26)
 $txtModel.Text = 'deepseek-chat'
-$form.Controls.Add($txtModel)
+$panelTop.Controls.Add($txtModel)
 
-Add-Label $form '窗口标题片段' 388 45 96 | Out-Null
+Add-Caption $panelTop '窗口标题片段' 358 44 104 | Out-Null
 $txtWin = New-Object System.Windows.Forms.TextBox
-$txtWin.Location = New-Object System.Drawing.Point(500, 42)
-$txtWin.Size = New-Object System.Drawing.Size(134, 24)
+$txtWin.Location = New-Object System.Drawing.Point(468, 44)
+$txtWin.Size = New-Object System.Drawing.Size(150, 26)
 $txtWin.Text = '在线学堂'
-$form.Controls.Add($txtWin)
+$panelTop.Controls.Add($txtWin)
 
-Add-Label $form 'API Key' 12 75 90 | Out-Null
+$chkTop = New-Object System.Windows.Forms.CheckBox
+$chkTop.Text = '窗口置顶'
+$chkTop.Location = New-Object System.Drawing.Point(662, 48)
+$chkTop.Size = New-Object System.Drawing.Size(90, 24)
+$chkTop.Add_Click({ $form.TopMost = $chkTop.Checked })
+$panelTop.Controls.Add($chkTop)
+
+Add-Caption $panelTop 'API Key' 6 80 122 | Out-Null
 $txtKey = New-Object System.Windows.Forms.TextBox
-$txtKey.Location = New-Object System.Drawing.Point(104, 72)
-$txtKey.Size = New-Object System.Drawing.Size(420, 24)
+$txtKey.Location = New-Object System.Drawing.Point(134, 80)
+$txtKey.Size = New-Object System.Drawing.Size(460, 26)
 $txtKey.UseSystemPasswordChar = $true
-$form.Controls.Add($txtKey)
+$panelTop.Controls.Add($txtKey)
 
-$btnShow = New-Object System.Windows.Forms.Button
-$btnShow.Text = '显示'
-$btnShow.Location = New-Object System.Drawing.Point(530, 71)
-$btnShow.Size = New-Object System.Drawing.Size(56, 26)
+$btnShow = New-FlatButton '显示' 600 79 70 28
 $btnShow.Add_Click({ $txtKey.UseSystemPasswordChar = -not $txtKey.UseSystemPasswordChar })
-$form.Controls.Add($btnShow)
+$panelTop.Controls.Add($btnShow)
 
 $grpImage = New-Object System.Windows.Forms.GroupBox
 $grpImage.Text = '图片题'
-$grpImage.Location = New-Object System.Drawing.Point(12, 104)
-$grpImage.Size = New-Object System.Drawing.Size(292, 52)
-$form.Controls.Add($grpImage)
+$grpImage.Location = New-Object System.Drawing.Point(8, 112)
+$grpImage.Size = New-Object System.Drawing.Size(480, 58)
+$panelTop.Controls.Add($grpImage)
+
+$rdoAuto = New-Object System.Windows.Forms.RadioButton
+$rdoAuto.Text = '自动看图作答'
+$rdoAuto.Checked = $true
+$rdoAuto.Location = New-Object System.Drawing.Point(12, 24)
+$rdoAuto.Size = New-Object System.Drawing.Size(120, 22)
+$grpImage.Controls.Add($rdoAuto)
 
 $rdoSkip = New-Object System.Windows.Forms.RadioButton
 $rdoSkip.Text = '跳过'
-$rdoSkip.Checked = $true
-$rdoSkip.Location = New-Object System.Drawing.Point(12, 20)
-$rdoSkip.Size = New-Object System.Drawing.Size(70, 22)
+$rdoSkip.Location = New-Object System.Drawing.Point(170, 24)
+$rdoSkip.Size = New-Object System.Drawing.Size(64, 22)
 $grpImage.Controls.Add($rdoSkip)
 
 $rdoWait = New-Object System.Windows.Forms.RadioButton
 $rdoWait.Text = '停留等我做'
-$rdoWait.Location = New-Object System.Drawing.Point(92, 20)
-$rdoWait.Size = New-Object System.Drawing.Size(120, 22)
+$rdoWait.Location = New-Object System.Drawing.Point(246, 24)
+$rdoWait.Size = New-Object System.Drawing.Size(110, 22)
 $grpImage.Controls.Add($rdoWait)
 
-$chkTop = New-Object System.Windows.Forms.CheckBox
-$chkTop.Text = '窗口置顶'
-$chkTop.Location = New-Object System.Drawing.Point(320, 108)
-$chkTop.Size = New-Object System.Drawing.Size(100, 22)
-$chkTop.Add_Click({ $form.TopMost = $chkTop.Checked })
-$form.Controls.Add($chkTop)
+$lblImageHint = New-Object System.Windows.Forms.Label
+$lblImageHint.Text = '需视觉模型'
+$lblImageHint.Location = New-Object System.Drawing.Point(372, 24)
+$lblImageHint.Size = New-Object System.Drawing.Size(96, 20)
+$lblImageHint.ForeColor = [System.Drawing.Color]::FromArgb(140, 144, 152)
+$grpImage.Controls.Add($lblImageHint)
 
-$btnRead = New-Object System.Windows.Forms.Button
-$btnRead.Text = '读取当前题'
-$btnRead.Location = New-Object System.Drawing.Point(424, 104)
-$btnRead.Size = New-Object System.Drawing.Size(120, 26)
-$form.Controls.Add($btnRead)
+$btnRead = New-FlatButton '读取当前题' 620 120 130 28
+$panelTop.Controls.Add($btnRead)
 
-$btnScan = New-Object System.Windows.Forms.Button
-$btnScan.Text = '检查答题卡'
-$btnScan.Location = New-Object System.Drawing.Point(12, 164)
-$btnScan.Size = New-Object System.Drawing.Size(100, 26)
-$form.Controls.Add($btnScan)
-
-$btnJump = New-Object System.Windows.Forms.Button
-$btnJump.Text = '跳到第一道未答'
-$btnJump.Location = New-Object System.Drawing.Point(120, 164)
-$btnJump.Size = New-Object System.Drawing.Size(120, 26)
-$form.Controls.Add($btnJump)
-
-$btnStop = New-Object System.Windows.Forms.Button
-$btnStop.Text = '停止'
-$btnStop.Location = New-Object System.Drawing.Point(248, 164)
-$btnStop.Size = New-Object System.Drawing.Size(64, 26)
-$btnStop.Enabled = $false
-$form.Controls.Add($btnStop)
+$panelButtons = New-Object System.Windows.Forms.FlowLayoutPanel
+$panelButtons.Location = New-Object System.Drawing.Point(8, 190)
+$panelButtons.Size = New-Object System.Drawing.Size(764, 44)
+$panelButtons.Anchor = 'Top,Left,Right'
+$panelButtons.WrapContents = $false
+$panelButtons.Padding = New-Object System.Windows.Forms.Padding(2, 2, 2, 2)
+$panelButtons.BackColor = [System.Drawing.Color]::Transparent
+$form.Controls.Add($panelButtons)
 
 $btnAuto = New-Object System.Windows.Forms.Button
 $btnAuto.Text = '自动作答'
-$btnAuto.Location = New-Object System.Drawing.Point(320, 164)
-$btnAuto.Size = New-Object System.Drawing.Size(104, 26)
-$form.Controls.Add($btnAuto)
+$btnAuto.AutoSize = $true
+$btnAuto.MinimumSize = New-Object System.Drawing.Size(96, 32)
+$btnAuto.Margin = New-Object System.Windows.Forms.Padding(3, 3, 3, 3)
+$panelButtons.Controls.Add($btnAuto)
+
+$btnStop = New-Object System.Windows.Forms.Button
+$btnStop.Text = '停止'
+$btnStop.AutoSize = $true
+$btnStop.MinimumSize = New-Object System.Drawing.Size(72, 32)
+$btnStop.Margin = New-Object System.Windows.Forms.Padding(3, 3, 3, 3)
+$btnStop.Enabled = $false
+$panelButtons.Controls.Add($btnStop)
+
+$btnScan = New-Object System.Windows.Forms.Button
+$btnScan.Text = '检查答题卡'
+$btnScan.AutoSize = $true
+$btnScan.MinimumSize = New-Object System.Drawing.Size(104, 32)
+$btnScan.Margin = New-Object System.Windows.Forms.Padding(3, 3, 3, 3)
+$panelButtons.Controls.Add($btnScan)
+
+$btnJump = New-Object System.Windows.Forms.Button
+$btnJump.Text = '跳到第一道未答'
+$btnJump.AutoSize = $true
+$btnJump.MinimumSize = New-Object System.Drawing.Size(124, 32)
+$btnJump.Margin = New-Object System.Windows.Forms.Padding(3, 3, 3, 3)
+$panelButtons.Controls.Add($btnJump)
 
 $btnSubmit = New-Object System.Windows.Forms.Button
 $btnSubmit.Text = '提交（需确认）'
-$btnSubmit.Location = New-Object System.Drawing.Point(432, 164)
-$btnSubmit.Size = New-Object System.Drawing.Size(120, 26)
-$form.Controls.Add($btnSubmit)
+$btnSubmit.AutoSize = $true
+$btnSubmit.MinimumSize = New-Object System.Drawing.Size(120, 32)
+$btnSubmit.Margin = New-Object System.Windows.Forms.Padding(3, 3, 3, 3)
+$panelButtons.Controls.Add($btnSubmit)
 
 $btnHelp = New-Object System.Windows.Forms.Button
 $btnHelp.Text = '说明 / 反馈'
-$btnHelp.Location = New-Object System.Drawing.Point(556, 164)
-$btnHelp.Size = New-Object System.Drawing.Size(120, 26)
+$btnHelp.AutoSize = $true
+$btnHelp.MinimumSize = New-Object System.Drawing.Size(96, 32)
+$btnHelp.Margin = New-Object System.Windows.Forms.Padding(3, 3, 3, 3)
 $btnHelp.Add_Click({ Start-Process $script:IssuesUrl })
-$form.Controls.Add($btnHelp)
+$panelButtons.Controls.Add($btnHelp)
 
 $txtLog = New-Object System.Windows.Forms.TextBox
-$txtLog.Location = New-Object System.Drawing.Point(12, 200)
-$txtLog.Size = New-Object System.Drawing.Size(672, 210)
+$txtLog.Location = New-Object System.Drawing.Point(8, 240)
+$txtLog.Size = New-Object System.Drawing.Size(764, 310)
 $txtLog.Multiline = $true
 $txtLog.ScrollBars = 'Vertical'
 $txtLog.ReadOnly = $true
+$txtLog.BackColor = [System.Drawing.Color]::White
 $txtLog.Font = New-Object System.Drawing.Font('Consolas', 9)
 $txtLog.Anchor = 'Top,Left,Right,Bottom'
 $form.Controls.Add($txtLog)
 
 $lnkUpdate = New-Object System.Windows.Forms.LinkLabel
 $lnkUpdate.Text = '当前版本 v' + $script:AppVersion + ' · 项目主页 / 反馈'
-$lnkUpdate.Location = New-Object System.Drawing.Point(12, 420)
-$lnkUpdate.Size = New-Object System.Drawing.Size(620, 20)
+$lnkUpdate.Location = New-Object System.Drawing.Point(8, 566)
+$lnkUpdate.Size = New-Object System.Drawing.Size(640, 20)
 $lnkUpdate.Anchor = 'Left,Bottom'
 $lnkUpdate.Add_Click({ Start-Process $script:RepoUrl })
 $form.Controls.Add($lnkUpdate)
@@ -555,6 +667,7 @@ $script:scanning = $false
 $script:missing = @()
 $script:answeredThisRun = @()
 $script:skippedThisRun = @()
+$script:autoImageThisRun = @()
 
 # ---------------------------------------------------------------- 免责声明
 
@@ -563,17 +676,17 @@ $disclaimerText = @'
 
 一、正确率会有浮动
 答案由你选择的大模型现场生成，不同模型、不同时间可能给出不同答案；多选题偶尔只给一个字母。
-本工具只做「读题 → 点选 → 保存」，答得对不对要你自己把关。
+本工具只做「读题 → 点选 → 保存」。
 
 二、图片题正确率一般
-选项是图片的题目，程序不读图、也不猜答案：默认跳过，或停下来等你自己选。
-所以这类题做对与否，取决于你。
+选项是图片的题目，可以交给模型看图作答（需要支持图像输入的模型），也可以选「跳过」或「停留等我做」。
+这类题正确率取决于模型与你，做对与否请自行判断。
 
 三、为爱发电
-免费、开源、无广告、不收费、不代做；不承诺分数，也不对成绩负责。
+免费、开源、无广告、不收费，仅限个人辅助学习，不可替代正常学习，不得转售！随缘更新；不承诺分数，也不对成绩负责。
 
 四、提交前请自己核对
-程序不会自动提交。点「提交（需确认）」后仍会核对一遍答题卡，但最终决定权在你。
+程序不会自动提交。点「提交（需确认）」后仍会核对一遍答题卡，最终决定权在用户。
 
 五、判色依赖环境
 「已选 / 未选」靠屏幕取色判断，浅色主题 + 75% 缩放下最准。
@@ -585,35 +698,37 @@ API Key 只保存在内存里，不写盘、不上传。不要把账号密码或
 七、有问题欢迎反馈
 GitHub Issues：请点下方「查看项目主页 / 反馈」
 贴日志时记得先把 Key 抹掉。
-
-当前版本 v0.3.0。以后有新版本，会在窗口底部提示。
 '@
+
+$disclaimerText = $disclaimerText + "`r`n当前版本 v" + $script:AppVersion + "。以后有新版本，会在窗口底部提示。"
 
 function Show-Disclaimer {
     $dlg = New-Object System.Windows.Forms.Form
     $dlg.Text = '使用前请读（v' + $script:AppVersion + '）'
-    $dlg.Size = New-Object System.Drawing.Size(720, 620)
+    $dlg.ClientSize = New-Object System.Drawing.Size(720, 560)
     $dlg.StartPosition = 'CenterScreen'
     $dlg.FormBorderStyle = 'FixedDialog'
     $dlg.MaximizeBox = $false
     $dlg.MinimizeBox = $false
+    $dlg.AutoScaleMode = [System.Windows.Forms.AutoScaleMode]::None
+    $dlg.Font = New-Object System.Drawing.Font('Microsoft YaHei UI', 9.5)
 
     $box = New-Object System.Windows.Forms.TextBox
     $box.Multiline = $true
     $box.ReadOnly = $true
     $box.ScrollBars = 'Vertical'
-    $box.Location = New-Object System.Drawing.Point(16, 16)
-    $box.Size = New-Object System.Drawing.Size(680, 470)
+    $box.BorderStyle = 'FixedSingle'
+    $box.Location = New-Object System.Drawing.Point(16, 14)
+    $box.Size = New-Object System.Drawing.Size(688, 476)
     $box.Text = ($disclaimerText -replace "`r?`n", "`r`n")
-    $box.Font = New-Object System.Drawing.Font('Microsoft YaHei UI', 9.5)
     $dlg.Controls.Add($box)
     $dlg.Add_Shown({ $box.SelectionStart = 0; $box.SelectionLength = 0; $box.ScrollToCaret() })
     $dlg.Add_Shown({ [void][ExamWin]::ShowWindow($dlg.Handle, 5); $dlg.Activate() })
 
     $chkNever = New-Object System.Windows.Forms.CheckBox
     $chkNever.Text = '本版本不再提示'
-    $chkNever.Location = New-Object System.Drawing.Point(16, 498)
-    $chkNever.Size = New-Object System.Drawing.Size(200, 24)
+    $chkNever.Location = New-Object System.Drawing.Point(16, 504)
+    $chkNever.Size = New-Object System.Drawing.Size(180, 26)
     if ($script:settings.Contains('disclaimerDismissedVersion')) {
         if ($script:settings['disclaimerDismissedVersion'] -eq $script:AppVersion) { $chkNever.Checked = $true }
     }
@@ -621,22 +736,19 @@ function Show-Disclaimer {
 
     $btnRepo = New-Object System.Windows.Forms.Button
     $btnRepo.Text = '查看项目主页 / 反馈'
-    $btnRepo.Location = New-Object System.Drawing.Point(300, 494)
-    $btnRepo.Size = New-Object System.Drawing.Size(170, 30)
+    $btnRepo.Location = New-Object System.Drawing.Point(280, 500)
+    $btnRepo.Size = New-Object System.Drawing.Size(180, 32)
     $btnRepo.Add_Click({ Start-Process $script:IssuesUrl })
     $dlg.Controls.Add($btnRepo)
 
     $btnOk = New-Object System.Windows.Forms.Button
     $btnOk.Text = '我知道了'
-    $btnOk.Location = New-Object System.Drawing.Point(480, 494)
-    $btnOk.Size = New-Object System.Drawing.Size(136, 30)
+    $btnOk.Location = New-Object System.Drawing.Point(484, 500)
+    $btnOk.Size = New-Object System.Drawing.Size(200, 32)
     $btnOk.DialogResult = 'OK'
     $dlg.Controls.Add($btnOk)
 
     $dlg.AcceptButton = $btnOk
-    $script:pendingNeverShow = $false
-    $chkNever.Add_CheckedChanged({ $script:pendingNeverShow = $chkNever.Checked })
-
     $res = $dlg.ShowDialog()
     $accepted = ($res -eq [System.Windows.Forms.DialogResult]::OK)
     if ($accepted -and $chkNever.Checked) {
@@ -734,6 +846,7 @@ $btnAuto.Add_Click({
     $script:running = $true
     $script:answeredThisRun = @()
     $script:skippedThisRun = @()
+    $script:autoImageThisRun = @()
     $btnAuto.Enabled = $false
     $btnStop.Enabled = $true
 
@@ -769,7 +882,12 @@ $btnAuto.Add_Click({
             $lastNum = $q.Num
 
             if (-not $q.HasText) {
-                if ($rdoWait.Checked) {
+                # 图片题：三种策略
+                $mode = 'auto'
+                if ($rdoSkip.Checked) { $mode = 'skip' }
+                elseif ($rdoWait.Checked) { $mode = 'wait' }
+
+                if ($mode -eq 'wait') {
                     $form.Show()
                     $script:running = $false
                     $r = [System.Windows.Forms.MessageBox]::Show(('第 ' + $q.Num + ' 题是图片题，请在浏览器里自己选好后点「确定」继续。'), '图片题', 'OKCancel', 'Information')
@@ -780,9 +898,42 @@ $btnAuto.Add_Click({
                     $script:skippedThisRun += $q.Num
                     Log ('第 ' + $q.Num + ' 题：用户自行作答')
                 }
-                else {
+                elseif ($mode -eq 'skip') {
                     $script:skippedThisRun += $q.Num
-                    Log ('第 ' + $q.Num + ' 题：图片题，跳过（可稍后自己补）')
+                    Log ('第 ' + $q.Num + ' 题：图片题，已跳过')
+                }
+                else {
+                    $png = Get-QuestionImage $txtWin.Text $q
+                    if (-not $png) {
+                        $script:skippedThisRun += $q.Num
+                        Log ('第 ' + $q.Num + ' 题：图片题截图失败，跳过')
+                    }
+                    else {
+                        try {
+                            $ans = Ask-Model-Vision $txtBase.Text $txtModel.Text $txtKey.Text $q $png
+                            if (-not $ans.Letters) {
+                                $script:skippedThisRun += $q.Num
+                                Log ('第 ' + $q.Num + ' 题：模型没给出字母（' + $ans.Raw + '），跳过')
+                            }
+                            else {
+                                $res = Apply-Answer $doc $ans.Letters $txtWin.Text
+                                $script:autoImageThisRun += $q.Num
+                                $script:answeredThisRun += $q.Num
+                                $now = '空'
+                                if ($res -and $res.After) { $now = $res.After }
+                                if ($res -and $res.Ok) {
+                                    Log ('第 ' + $q.Num + ' 题 [图片题] 模型选 ' + $ans.Letters + '（现 ' + $now + '）')
+                                }
+                                else {
+                                    Log ('第 ' + $q.Num + ' 题 [图片题] 模型选 ' + $ans.Letters + '，点击后实际 ' + $now + '，请人工确认')
+                                }
+                            }
+                        }
+                        catch {
+                            $script:skippedThisRun += $q.Num
+                            Log ('第 ' + $q.Num + ' 题：图片问答失败（模型可能不支持图像输入）- ' + $_.Exception.Message)
+                        }
+                    }
                 }
             }
             else {
@@ -817,7 +968,8 @@ $btnAuto.Add_Click({
         }
 
         $msg = '本套填答结束：作答 ' + $script:answeredThisRun.Count + ' 题'
-        if ($script:skippedThisRun.Count -gt 0) { $msg += '；图片题 ' + ($script:skippedThisRun -join ', ') }
+        if ($script:autoImageThisRun.Count -gt 0) { $msg += '（其中图片题 ' + $script:autoImageThisRun.Count + ' 道自动作答）' }
+        if ($script:skippedThisRun.Count -gt 0) { $msg += '；未作答 ' + ($script:skippedThisRun -join ', ') }
         Log $msg
         Log '开始核对答题卡…'
         $script:scanning = $true
@@ -901,10 +1053,16 @@ $form.Add_Shown({
     if ($script:settings.Contains('baseUrl') -and $script:settings['baseUrl']) { $txtBase.Text = [string]$script:settings['baseUrl'] }
     if ($script:settings.Contains('model') -and $script:settings['model']) { $txtModel.Text = [string]$script:settings['model'] }
     if ($script:settings.Contains('winMatch') -and $script:settings['winMatch']) { $txtWin.Text = [string]$script:settings['winMatch'] }
-    if ($script:settings.Contains('imageMode') -and $script:settings['imageMode'] -eq 'wait') { $rdoWait.Checked = $true }
+    if ($script:settings.Contains('imageMode')) {
+        switch ([string]$script:settings['imageMode']) {
+            'skip' { $rdoSkip.Checked = $true }
+            'wait' { $rdoWait.Checked = $true }
+            default { $rdoAuto.Checked = $true }
+        }
+    }
     if ($script:settings.Contains('topMost') -and $script:settings['topMost']) { $chkTop.Checked = $true; $form.TopMost = $true }
     Log ('智慧树单元测试助手 v' + $script:AppVersion + ' 已启动')
-    Log '提醒：本程序不会自动提交；正确率随模型浮动，图片题需自行判断。'
+    Log '提醒：本程序不会自动提交；正确率随模型浮动，图片题建议使用支持图像输入的模型。'
 })
 
 $form.Add_FormClosing({
@@ -912,7 +1070,9 @@ $form.Add_FormClosing({
         $script:settings['baseUrl'] = $txtBase.Text
         $script:settings['model'] = $txtModel.Text
         $script:settings['winMatch'] = $txtWin.Text
-        $script:settings['imageMode'] = $(if ($rdoWait.Checked) { 'wait' } else { 'skip' })
+        if ($rdoSkip.Checked) { $script:settings['imageMode'] = 'skip' }
+        elseif ($rdoWait.Checked) { $script:settings['imageMode'] = 'wait' }
+        else { $script:settings['imageMode'] = 'auto' }
         $script:settings['topMost'] = [bool]$chkTop.Checked
         $script:settings['windowX'] = $form.Left
         $script:settings['windowY'] = $form.Top
