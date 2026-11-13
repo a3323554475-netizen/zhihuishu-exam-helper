@@ -386,13 +386,14 @@ function Scan-Missing([string]$match, [switch]$Quiet) {
 
 $form = New-Object System.Windows.Forms.Form
 $form.Text = '智慧树单元测试助手 v' + $script:AppVersion
-$form.Size = New-Object System.Drawing.Size(660, 500)
+$form.Size = New-Object System.Drawing.Size(700, 500)
 $form.StartPosition = 'Manual'
 $form.TopMost = $false
+$form.AutoScaleMode = [System.Windows.Forms.AutoScaleMode]::None
 $form.MinimumSize = New-Object System.Drawing.Size(560, 260)
 
 $wa = [System.Windows.Forms.Screen]::PrimaryScreen.WorkingArea
-$startX = $wa.Right - 680
+$startX = $wa.Right - 720
 $startY = $wa.Bottom - 520
 if ($script:settings.Contains('windowX') -and $script:settings.Contains('windowY')) {
     try {
@@ -414,7 +415,7 @@ function Add-Label($parent, $text, $x, $y, $w) {
 Add-Label $form 'API Base URL' 12 15 90 | Out-Null
 $txtBase = New-Object System.Windows.Forms.TextBox
 $txtBase.Location = New-Object System.Drawing.Point(104, 12)
-$txtBase.Size = New-Object System.Drawing.Size(530, 24)
+$txtBase.Size = New-Object System.Drawing.Size(570, 24)
 $txtBase.Text = 'https://api.deepseek.com/v1'
 $form.Controls.Add($txtBase)
 
@@ -427,21 +428,21 @@ $form.Controls.Add($txtModel)
 
 Add-Label $form '窗口标题片段' 388 45 96 | Out-Null
 $txtWin = New-Object System.Windows.Forms.TextBox
-$txtWin.Location = New-Object System.Drawing.Point(486, 42)
-$txtWin.Size = New-Object System.Drawing.Size(148, 24)
+$txtWin.Location = New-Object System.Drawing.Point(500, 42)
+$txtWin.Size = New-Object System.Drawing.Size(134, 24)
 $txtWin.Text = '在线学堂'
 $form.Controls.Add($txtWin)
 
 Add-Label $form 'API Key' 12 75 90 | Out-Null
 $txtKey = New-Object System.Windows.Forms.TextBox
 $txtKey.Location = New-Object System.Drawing.Point(104, 72)
-$txtKey.Size = New-Object System.Drawing.Size(400, 24)
+$txtKey.Size = New-Object System.Drawing.Size(420, 24)
 $txtKey.UseSystemPasswordChar = $true
 $form.Controls.Add($txtKey)
 
 $btnShow = New-Object System.Windows.Forms.Button
 $btnShow.Text = '显示'
-$btnShow.Location = New-Object System.Drawing.Point(510, 71)
+$btnShow.Location = New-Object System.Drawing.Point(530, 71)
 $btnShow.Size = New-Object System.Drawing.Size(56, 26)
 $btnShow.Add_Click({ $txtKey.UseSystemPasswordChar = -not $txtKey.UseSystemPasswordChar })
 $form.Controls.Add($btnShow)
@@ -474,8 +475,8 @@ $form.Controls.Add($chkTop)
 
 $btnRead = New-Object System.Windows.Forms.Button
 $btnRead.Text = '读取当前题'
-$btnRead.Location = New-Object System.Drawing.Point(438, 104)
-$btnRead.Size = New-Object System.Drawing.Size(90, 26)
+$btnRead.Location = New-Object System.Drawing.Point(424, 104)
+$btnRead.Size = New-Object System.Drawing.Size(120, 26)
 $form.Controls.Add($btnRead)
 
 $btnScan = New-Object System.Windows.Forms.Button
@@ -500,25 +501,25 @@ $form.Controls.Add($btnStop)
 $btnAuto = New-Object System.Windows.Forms.Button
 $btnAuto.Text = '自动作答'
 $btnAuto.Location = New-Object System.Drawing.Point(320, 164)
-$btnAuto.Size = New-Object System.Drawing.Size(90, 26)
+$btnAuto.Size = New-Object System.Drawing.Size(104, 26)
 $form.Controls.Add($btnAuto)
 
 $btnSubmit = New-Object System.Windows.Forms.Button
 $btnSubmit.Text = '提交（需确认）'
-$btnSubmit.Location = New-Object System.Drawing.Point(418, 164)
-$btnSubmit.Size = New-Object System.Drawing.Size(110, 26)
+$btnSubmit.Location = New-Object System.Drawing.Point(432, 164)
+$btnSubmit.Size = New-Object System.Drawing.Size(120, 26)
 $form.Controls.Add($btnSubmit)
 
 $btnHelp = New-Object System.Windows.Forms.Button
 $btnHelp.Text = '说明 / 反馈'
-$btnHelp.Location = New-Object System.Drawing.Point(536, 164)
-$btnHelp.Size = New-Object System.Drawing.Size(98, 26)
+$btnHelp.Location = New-Object System.Drawing.Point(556, 164)
+$btnHelp.Size = New-Object System.Drawing.Size(120, 26)
 $btnHelp.Add_Click({ Start-Process $script:IssuesUrl })
 $form.Controls.Add($btnHelp)
 
 $txtLog = New-Object System.Windows.Forms.TextBox
 $txtLog.Location = New-Object System.Drawing.Point(12, 200)
-$txtLog.Size = New-Object System.Drawing.Size(620, 210)
+$txtLog.Size = New-Object System.Drawing.Size(672, 210)
 $txtLog.Multiline = $true
 $txtLog.ScrollBars = 'Vertical'
 $txtLog.ReadOnly = $true
@@ -529,7 +530,7 @@ $form.Controls.Add($txtLog)
 $lnkUpdate = New-Object System.Windows.Forms.LinkLabel
 $lnkUpdate.Text = '当前版本 v' + $script:AppVersion + ' · 项目主页 / 反馈'
 $lnkUpdate.Location = New-Object System.Drawing.Point(12, 420)
-$lnkUpdate.Size = New-Object System.Drawing.Size(520, 20)
+$lnkUpdate.Size = New-Object System.Drawing.Size(620, 20)
 $lnkUpdate.Anchor = 'Left,Bottom'
 $lnkUpdate.Add_Click({ Start-Process $script:RepoUrl })
 $form.Controls.Add($lnkUpdate)
@@ -591,7 +592,7 @@ GitHub Issues：请点下方「查看项目主页 / 反馈」
 function Show-Disclaimer {
     $dlg = New-Object System.Windows.Forms.Form
     $dlg.Text = '使用前请读（v' + $script:AppVersion + '）'
-    $dlg.Size = New-Object System.Drawing.Size(640, 560)
+    $dlg.Size = New-Object System.Drawing.Size(720, 620)
     $dlg.StartPosition = 'CenterScreen'
     $dlg.FormBorderStyle = 'FixedDialog'
     $dlg.MaximizeBox = $false
@@ -602,14 +603,15 @@ function Show-Disclaimer {
     $box.ReadOnly = $true
     $box.ScrollBars = 'Vertical'
     $box.Location = New-Object System.Drawing.Point(16, 16)
-    $box.Size = New-Object System.Drawing.Size(590, 420)
-    $box.Text = $disclaimerText
+    $box.Size = New-Object System.Drawing.Size(680, 470)
+    $box.Text = ($disclaimerText -replace "`r?`n", "`r`n")
     $box.Font = New-Object System.Drawing.Font('Microsoft YaHei UI', 9.5)
     $dlg.Controls.Add($box)
+    $dlg.Add_Shown({ $box.SelectionStart = 0; $box.SelectionLength = 0; $box.ScrollToCaret() })
 
     $chkNever = New-Object System.Windows.Forms.CheckBox
     $chkNever.Text = '本版本不再提示'
-    $chkNever.Location = New-Object System.Drawing.Point(16, 448)
+    $chkNever.Location = New-Object System.Drawing.Point(16, 498)
     $chkNever.Size = New-Object System.Drawing.Size(200, 24)
     if ($script:settings.Contains('disclaimerDismissedVersion')) {
         if ($script:settings['disclaimerDismissedVersion'] -eq $script:AppVersion) { $chkNever.Checked = $true }
@@ -618,14 +620,14 @@ function Show-Disclaimer {
 
     $btnRepo = New-Object System.Windows.Forms.Button
     $btnRepo.Text = '查看项目主页 / 反馈'
-    $btnRepo.Location = New-Object System.Drawing.Point(240, 444)
+    $btnRepo.Location = New-Object System.Drawing.Point(300, 494)
     $btnRepo.Size = New-Object System.Drawing.Size(170, 30)
     $btnRepo.Add_Click({ Start-Process $script:IssuesUrl })
     $dlg.Controls.Add($btnRepo)
 
     $btnOk = New-Object System.Windows.Forms.Button
     $btnOk.Text = '我知道了'
-    $btnOk.Location = New-Object System.Drawing.Point(470, 444)
+    $btnOk.Location = New-Object System.Drawing.Point(480, 494)
     $btnOk.Size = New-Object System.Drawing.Size(136, 30)
     $btnOk.DialogResult = 'OK'
     $dlg.Controls.Add($btnOk)
